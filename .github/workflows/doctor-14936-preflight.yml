@@ -34,8 +34,8 @@ jobs:
       MISE_LOCKED: "1"
       EXPECTED_PREVIOUS_SOURCE: fcdd3900a126e1751140d96fe396f287ff2ec823
       EXPECTED_BASE_SHA: 269420244d45ec6ff479b22d7db6259b3fd77c77
-      EXPECTED_PATCH_SHA256: 7f61c1b986ea6e98100bc70fc31d04c53215224a2748f17b8ee4b42c39e4c66d
-      EXPECTED_SOURCE_TREE: 73bde574865ee9be6728b261181913fb9a214d38
+      EXPECTED_PATCH_SHA256: 6e5125d70f6aa8ffd4f1d28d89e7c82a31892e76feb6fa04e356673d7c085e7e
+      EXPECTED_SOURCE_TREE: 58f02689c0a2ce1a1e45d6d440d28ea2694c3a0a
     defaults:
       run:
         shell: bash
@@ -87,6 +87,7 @@ jobs:
           patch_file.write_bytes(patch)
           patch_file.chmod(0o600)
           allowed = {
+              "src/args/backend_arg.rs",
               "src/cli/doctor/mod.rs",
               "docs/dev-tools/backends/index.md",
               "e2e/cli/test_doctor_explicit_backends",
@@ -96,7 +97,7 @@ jobs:
           )
           paths = {line.split("\t", 2)[2] for line in statistics.splitlines()}
           if paths != allowed:
-              raise SystemExit("The patch does not contain exactly the three approved source paths")
+              raise SystemExit("The patch does not contain exactly the four approved source paths")
           subprocess.run(["git", "apply", "--check", "--whitespace=error-all", str(patch_file)], check=True)
           subprocess.run(["git", "apply", "--whitespace=error-all", str(patch_file)], check=True)
           subprocess.run(["git", "add", "--", *sorted(allowed)], check=True)
@@ -124,7 +125,7 @@ jobs:
               raise SystemExit(f"The staged source tree changed during verification: {tree}")
           if subprocess.run(["git", "diff", "--quiet", "--"]).returncode != 0:
               subprocess.run(["git", "diff", "--stat", "--"], check=True)
-              subprocess.run(["git", "diff", "--", "src/cli/doctor/mod.rs",
+              subprocess.run(["git", "diff", "--", "src/args/backend_arg.rs", "src/cli/doctor/mod.rs",
                               "docs/dev-tools/backends/index.md",
                               "e2e/cli/test_doctor_explicit_backends"], check=True)
               raise SystemExit("A check changed tracked source files")
@@ -193,7 +194,8 @@ jobs:
           unset GITHUB_TOKEN MISE_GITHUB_TOKEN GH_TOKEN GITHUB_API_TOKEN
           git fetch --no-tags --depth=1 https://github.com/Aschenbath/mise.git "$EXPECTED_PREVIOUS_SOURCE"
           test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_PREVIOUS_SOURCE"
-          trap 'git restore --worktree -- src/cli/doctor/mod.rs' EXIT
+          trap 'git restore --worktree -- src/args/backend_arg.rs src/cli/doctor/mod.rs' EXIT
+          git show "${EXPECTED_PREVIOUS_SOURCE}:src/args/backend_arg.rs" > src/args/backend_arg.rs
           git show "${EXPECTED_PREVIOUS_SOURCE}:src/cli/doctor/mod.rs" > src/cli/doctor/mod.rs
           cargo build --locked --all-features
           sha256sum "$CARGO_TARGET_DIR/debug/mise"
@@ -215,7 +217,7 @@ jobs:
               raise SystemExit('The baseline failed for a reason other than the missing lockfile warning')
           print('Confirmed expected RED: the published candidate hid the lockfile migration warning')
           PY
-          git restore --worktree -- src/cli/doctor/mod.rs
+          git restore --worktree -- src/args/backend_arg.rs src/cli/doctor/mod.rs
           trap - EXIT
           python3 "$RUNNER_TEMP/check-mise-source.py"
 
