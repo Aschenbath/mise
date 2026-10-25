@@ -33,8 +33,8 @@ jobs:
       MISE_LOCKFILE: "1"
       MISE_LOCKED: "1"
       EXPECTED_BASE_SHA: 269420244d45ec6ff479b22d7db6259b3fd77c77
-      EXPECTED_PATCH_SHA256: 3c6afa1e50ba0f1146a64ddf8ed16f382be2d87f60127ec2357e0b9b15ed6f49
-      EXPECTED_SOURCE_TREE: e68273c90e805baf9b83f40cfaa8d6ec4036fb02
+      EXPECTED_PATCH_SHA256: 6ec7d8afc4443fd4a052e467e6c787cf9338e175e848c1d9a376851fd730b1e3
+      EXPECTED_SOURCE_TREE: 49d806edde9eb92ed444f9498f3b41ef01c47ec1
     defaults:
       run:
         shell: bash
@@ -119,9 +119,13 @@ jobs:
               raise SystemExit("The source base changed during verification")
           tree = git("write-tree")
           if tree != os.environ["EXPECTED_SOURCE_TREE"]:
+              subprocess.run(["git", "diff", "--stat", os.environ["EXPECTED_SOURCE_TREE"], tree], check=True)
               raise SystemExit(f"The staged source tree changed during verification: {tree}")
           if subprocess.run(["git", "diff", "--quiet", "--"]).returncode != 0:
-              subprocess.run(["git", "diff", "--name-only", "--"], check=True)
+              subprocess.run(["git", "diff", "--stat", "--"], check=True)
+              subprocess.run(["git", "diff", "--", "src/cli/doctor/mod.rs",
+                              "docs/dev-tools/backends/index.md",
+                              "e2e/cli/test_doctor_explicit_backends"], check=True)
               raise SystemExit("A check changed tracked source files")
           untracked = git("ls-files", "--others", "--exclude-standard")
           if untracked:
