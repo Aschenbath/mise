@@ -32,9 +32,10 @@ jobs:
       MISE_EXPERIMENTAL: "1"
       MISE_LOCKFILE: "1"
       MISE_LOCKED: "1"
+      EXPECTED_PREVIOUS_SOURCE: fcdd3900a126e1751140d96fe396f287ff2ec823
       EXPECTED_BASE_SHA: 269420244d45ec6ff479b22d7db6259b3fd77c77
-      EXPECTED_PATCH_SHA256: 6ec7d8afc4443fd4a052e467e6c787cf9338e175e848c1d9a376851fd730b1e3
-      EXPECTED_SOURCE_TREE: 49d806edde9eb92ed444f9498f3b41ef01c47ec1
+      EXPECTED_PATCH_SHA256: 7f61c1b986ea6e98100bc70fc31d04c53215224a2748f17b8ee4b42c39e4c66d
+      EXPECTED_SOURCE_TREE: 73bde574865ee9be6728b261181913fb9a214d38
     defaults:
       run:
         shell: bash
@@ -185,6 +186,60 @@ jobs:
         id: tree_after_clippy
         run: python3 "$RUNNER_TEMP/check-mise-source.py"
 
+      - name: Reproduce the lockfile regression on the published candidate
+        id: lockfile_red
+        run: |
+          set -euo pipefail
+          unset GITHUB_TOKEN MISE_GITHUB_TOKEN GH_TOKEN GITHUB_API_TOKEN
+          git fetch --no-tags --depth=1 https://github.com/Aschenbath/mise.git "$EXPECTED_PREVIOUS_SOURCE"
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_PREVIOUS_SOURCE"
+          trap 'git restore --worktree -- src/cli/doctor/mod.rs' EXIT
+          git show "${EXPECTED_PREVIOUS_SOURCE}:src/cli/doctor/mod.rs" > src/cli/doctor/mod.rs
+          cargo build --locked --all-features
+          sha256sum "$CARGO_TARGET_DIR/debug/mise"
+          export MISE_E2E_DOCKER=0 MISE_E2E_INSIDE_DOCKER=1
+          export TMPDIR="$RUNNER_TEMP/doctor-14936-red"
+          mkdir -p "$TMPDIR"
+          set +e
+          mise run --skip-deps --skip-tools test:e2e '^test_doctor_explicit_backends$' > "$RUNNER_TEMP/doctor-14936-red.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/doctor-14936-red.log"
+          test "$result" -ne 0
+          python3 <<'PY'
+          import os
+          from pathlib import Path
+          output = (Path(os.environ['RUNNER_TEMP']) / 'doctor-14936-red.log').read_text()
+          expected = "expected 'tool 'neovim' installed with explicit backend 'aqua:neovim/neovim'' to be in"
+          if 'E2E assertion failed:' not in output or expected not in output:
+              raise SystemExit('The baseline failed for a reason other than the missing lockfile warning')
+          print('Confirmed expected RED: the published candidate hid the lockfile migration warning')
+          PY
+          git restore --worktree -- src/cli/doctor/mod.rs
+          trap - EXIT
+          python3 "$RUNNER_TEMP/check-mise-source.py"
+
+      - name: Run the Doctor unit regressions on the final candidate
+        id: doctor_unit
+        run: |
+          unset GITHUB_TOKEN MISE_GITHUB_TOKEN GH_TOKEN GITHUB_API_TOKEN
+          cargo test --locked --all-features --bin mise backend_mismatch -- --nocapture --test-threads=1
+          python3 "$RUNNER_TEMP/check-mise-source.py"
+
+      - name: Run the complete Doctor backend E2E on the final candidate
+        id: doctor_e2e
+        run: |
+          set -euo pipefail
+          unset GITHUB_TOKEN MISE_GITHUB_TOKEN GH_TOKEN GITHUB_API_TOKEN
+          cargo build --locked --all-features
+          sha256sum "$CARGO_TARGET_DIR/debug/mise"
+          export MISE_E2E_DOCKER=0 MISE_E2E_INSIDE_DOCKER=1
+          export TMPDIR="$RUNNER_TEMP/doctor-14936-green"
+          mkdir -p "$TMPDIR"
+          mise run --skip-deps --skip-tools test:e2e '^test_doctor_explicit_backends$'
+          python3 "$RUNNER_TEMP/check-mise-source.py"
+
+
       - name: Build documentation without publishing
         id: docs_build
         run: |
@@ -204,6 +259,9 @@ jobs:
           LINT_TREE_RESULT: ${{ steps.tree_after_lint.outcome }}
           CLIPPY_RESULT: ${{ steps.clippy.outcome }}
           CLIPPY_TREE_RESULT: ${{ steps.tree_after_clippy.outcome }}
+          LOCKFILE_RED_RESULT: ${{ steps.lockfile_red.outcome }}
+          DOCTOR_UNIT_RESULT: ${{ steps.doctor_unit.outcome }}
+          DOCTOR_E2E_RESULT: ${{ steps.doctor_e2e.outcome }}
           DOCS_RESULT: ${{ steps.docs_build.outcome }}
           DOCS_TREE_RESULT: ${{ steps.tree_after_docs.outcome }}
         run: |
@@ -222,6 +280,9 @@ jobs:
             printf '| Source unchanged after lint fix | %s |\n' "${LINT_TREE_RESULT:-not-run}"
             printf '| Exact required Clippy | %s |\n' "${CLIPPY_RESULT:-not-run}"
             printf '| Source unchanged after Clippy | %s |\n' "${CLIPPY_TREE_RESULT:-not-run}"
+            printf '| Expected lockfile regression RED | %s |\n' "${LOCKFILE_RED_RESULT:-not-run}"
+            printf '| Doctor unit tests | %s |\n' "${DOCTOR_UNIT_RESULT:-not-run}"
+            printf '| Doctor backend E2E | %s |\n' "${DOCTOR_E2E_RESULT:-not-run}"
             printf '| Documentation build | %s |\n' "${DOCS_RESULT:-not-run}"
             printf '| Source unchanged after docs build | %s |\n' "${DOCS_TREE_RESULT:-not-run}"
           } >> "$GITHUB_STEP_SUMMARY"
