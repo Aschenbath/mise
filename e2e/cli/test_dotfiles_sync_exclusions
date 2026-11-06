@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016
+# Independent global exclusions merge without deleting the newly unmanaged files.
+require_cmd git
+export MISE_HISTORY_NOTIFY=false
+origin="$PWD/exclusions-origin.git"
+git init -q --bare -b main "$origin"
+mkdir -p ~/.sample
+echo common >~/.sample/common
+echo first >~/.sample/first
+echo second >~/.sample/second
+echo shared >~/.sample/keep
+assert_succeed "mise dot track ~/.sample"
+assert_succeed "mise dot exclude '~/.sample/common'"
+assert_succeed 'mise dot save'
+assert_succeed "mise dot origin set file://$origin --sync manual --yes"
+assert_succeed 'mise dot sync'
+
+second="$(dirname "$HOME")/exclusions-machine"
+mkdir -p "$second"
+b() {
+  (
+    cd "$second" || exit
+    env HOME="$second" XDG_CONFIG_HOME="$second/.config" MISE_CONFIG_DIR="$second/.config/mise" \
+      MISE_STATE_DIR="$second/.local/state/mise" MISE_DATA_DIR="$second/.local/share/mise" \
+      MISE_CACHE_DIR="$second/.cache/mise" MISE_TRUSTED_CONFIG_PATHS="$second" mise "$@"
+  )
+}
+export second
+export -f b
+assert_succeed "b bootstrap --adopt file://$origin --yes"
+assert_succeed "b dot origin set file://$origin --sync manual --yes"
+echo common >"$second/.sample/common"
+repository="$second/.local/state/mise/history/repo.git"
+
+# Both machines add a different exclusion relative to the same base.
+assert_succeed "mise dot exclude '~/.sample/first'"
+assert_succeed 'mise dot save'
+assert_succeed 'mise dot sync'
+assert_succeed "b dot exclude '~/.sample/second'"
+assert_succeed 'b dot save'
+before=$(git --git-dir="$repository" rev-parse main)
+assert_succeed 'b dot sync --fetch-only'
+assert "git --git-dir=$repository rev-parse main" "$before"
+assert_succeed 'b dot pull --yes'
+assert_succeed 'b dot sync'
+assert_succeed 'mise dot sync --fetch-only'
+assert_succeed 'mise dot pull --yes'
+expected='["~/.sample/common","~/.sample/first","~/.sample/second"]'
+assert_json "git --git-dir=$origin show main:.mise-history/manifest.json | jq '.exclude'" "$expected"
+assert_json "mise dot paths --json | jq '.exclude'" "$expected"
+assert_json "b dot paths --json | jq '.exclude'" "$expected"
+assert "cat ~/.sample/first" 'first'
+assert "cat ~/.sample/second" 'second'
+assert "cat $second/.sample/first" 'first'
+assert "cat $second/.sample/second" 'second'
+assert_fail "git --git-dir=$origin cat-file -e main:home/.sample/first"
+assert_fail "git --git-dir=$origin cat-file -e main:home/.sample/second"
+assert "git --git-dir=$origin show main:home/.sample/keep" 'shared'
+
+# Removing an existing exclusion must survive another machine adding one.
+assert_succeed "mise dot include '~/.sample/common'"
+assert_succeed 'mise dot save'
+assert_succeed 'mise dot sync'
+assert_succeed "b dot exclude '~/.sample/future'"
+assert_succeed 'b dot save'
+assert_succeed 'b dot sync --fetch-only'
+assert_succeed 'b dot pull --yes'
+assert_succeed 'b dot sync'
+assert_succeed 'mise dot sync --fetch-only'
+assert_succeed 'mise dot pull --yes'
+expected='["~/.sample/first","~/.sample/future","~/.sample/second"]'
+assert_json "git --git-dir=$origin show main:.mise-history/manifest.json | jq '.exclude'" "$expected"
+assert_json "mise dot paths --json | jq '.exclude'" "$expected"
+assert_json "b dot paths --json | jq '.exclude'" "$expected"
+assert "git --git-dir=$origin show main:home/.sample/common" 'common'
+assert "cat $second/.sample/common" 'common'
+assert "cat $second/.sample/first" 'first'
+assert "cat $second/.sample/second" 'second'
+
+# Saving after convergence must not restore either machine's old exclusion list.
+assert_succeed 'mise dot save'
+assert_succeed 'b dot save'
+assert_json "b dot paths --json | jq '.exclude'" "$expected"
+assert_succeed 'b dot sync'
+assert_succeed 'mise dot sync'
+assert_json "git --git-dir=$origin show main:.mise-history/manifest.json | jq '.exclude'" "$expected"

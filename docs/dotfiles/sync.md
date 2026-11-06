@@ -195,6 +195,13 @@ authentication attempt fails, automatic sync retries with delays that grow
 from one minute to one hour. `mise dot status` and `mise doctor` show the last
 error.
 
+Changes to ordinary `[history] exclude` rules merge independently. If two
+machines start with `["*.log"]` and one adds `"cache/**"` while the other adds
+`"sessions/**"`, the merged list excludes all three. Removing a rule on one
+machine also survives an unrelated addition on the other. Lists containing
+`!` rules depend on order, so different changes on both machines still require
+manual reconciliation if the shared base or either changed list contains one.
+
 ## Pull and apply {#pull-and-apply}
 
 `sync`, `pull`, and `apply` each do one job, on different files:

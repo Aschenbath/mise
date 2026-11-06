@@ -352,7 +352,7 @@ impl Manifest {
         let merged = Self {
             format: 1,
             enrollment,
-            exclude: choose(&base.exclude, &local.exclude, &remote.exclude, "exclusions")?,
+            exclude: merge_exclusions(&base.exclude, &local.exclude, &remote.exclude)?,
             recipients: choose(
                 &base.recipients,
                 &local.recipients,
@@ -697,6 +697,37 @@ impl Manifest {
             ],
         )
     }
+}
+
+/// Plain exclusions have set membership semantics. Negated rules make their
+/// order significant, so concurrent edits involving them remain a conflict.
+fn merge_exclusions(base: &[String], local: &[String], remote: &[String]) -> Result<Vec<String>> {
+    if local == remote || remote == base {
+        return Ok(local.to_vec());
+    }
+    if local == base {
+        return Ok(remote.to_vec());
+    }
+    if base
+        .iter()
+        .chain(local)
+        .chain(remote)
+        .any(|pattern| pattern.starts_with('!'))
+    {
+        bail!("enrollment conflict in exclusions; reconcile repository metadata before syncing");
+    }
+    let base: std::collections::BTreeSet<_> = base.iter().collect();
+    let local: std::collections::BTreeSet<_> = local.iter().collect();
+    let remote: std::collections::BTreeSet<_> = remote.iter().collect();
+    // Keep additions from either side, but retain a base rule only if neither
+    // side removed it. Sorting makes both directions produce the same manifest.
+    Ok(local
+        .union(&remote)
+        .filter(|pattern| {
+            !base.contains(*pattern) || local.contains(*pattern) && remote.contains(*pattern)
+        })
+        .map(|pattern| (*pattern).clone())
+        .collect())
 }
 
 /// How many components a portable path has.
@@ -1278,6 +1309,139 @@ mod tests {
                 .to_string()
                 .contains("home/.removed")
         );
+    }
+
+    fn manifest_with_exclusions(patterns: &[&str]) -> Manifest {
+        Manifest {
+            exclude: patterns.iter().map(|pattern| (*pattern).into()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn assert_exclusions_merge(base: &[&str], local: &[&str], remote: &[&str], expected: &[&str]) {
+        let (base, local, remote, expected) = (
+            manifest_with_exclusions(base),
+            manifest_with_exclusions(local),
+            manifest_with_exclusions(remote),
+            manifest_with_exclusions(expected),
+        );
+        assert_eq!(Manifest::merge(&base, &local, &remote).unwrap(), expected);
+        assert_eq!(Manifest::merge(&base, &remote, &local).unwrap(), expected);
+    }
+
+    #[test]
+    fn exclusion_merge_preserves_independent_additions() {
+        assert_exclusions_merge(
+            &["shared/**"],
+            &["shared/**", "local/**"],
+            &["shared/**", "remote/**"],
+            &["local/**", "remote/**", "shared/**"],
+        );
+        assert_exclusions_merge(
+            &[],
+            &["local/**"],
+            &["remote/**"],
+            &["local/**", "remote/**"],
+        );
+    }
+
+    #[test]
+    fn exclusion_merge_preserves_removals_alongside_additions() {
+        assert_exclusions_merge(
+            &["removed/**", "shared/**"],
+            &["shared/**", "local/**"],
+            &["removed/**", "shared/**", "remote/**"],
+            &["local/**", "remote/**", "shared/**"],
+        );
+        assert_exclusions_merge(
+            &["removed/**"],
+            &[],
+            &["removed/**", "remote/**"],
+            &["remote/**"],
+        );
+    }
+
+    #[test]
+    fn exclusion_merge_preserves_independent_removals() {
+        assert_exclusions_merge(
+            &["local/**", "remote/**", "shared/**"],
+            &["remote/**", "shared/**"],
+            &["local/**", "shared/**"],
+            &["shared/**"],
+        );
+        assert_exclusions_merge(
+            &["local/**", "remote/**"],
+            &["remote/**"],
+            &["local/**"],
+            &[],
+        );
+    }
+
+    #[test]
+    fn exclusion_merge_deduplicates_concurrent_additions() {
+        assert_exclusions_merge(
+            &["removed/**"],
+            &["local/**", "shared/**", "shared/**"],
+            &["removed/**", "remote/**", "shared/**"],
+            &["local/**", "remote/**", "shared/**"],
+        );
+    }
+
+    #[test]
+    fn exclusion_merge_preserves_one_sided_and_identical_ordered_changes() {
+        assert_exclusions_merge(
+            &["**", "!keep", "private/**"],
+            &["private/**", "**", "!keep"],
+            &["**", "!keep", "private/**"],
+            &["private/**", "**", "!keep"],
+        );
+        assert_exclusions_merge(
+            &["**"],
+            &["**", "!keep"],
+            &["**", "!keep"],
+            &["**", "!keep"],
+        );
+        // Unrelated enrollment changes also leave an ordered list intact.
+        let base = manifest_with_exclusions(&["**", "!keep"]);
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        local.enrollment.push(enrollment("home/.local"));
+        remote.enrollment.push(enrollment("home/.remote"));
+        assert_eq!(
+            Manifest::merge(&base, &local, &remote).unwrap().exclude,
+            base.exclude
+        );
+    }
+
+    #[test]
+    fn exclusion_merge_rejects_concurrent_changes_involving_negation() {
+        for (base, local, remote) in [
+            (vec![], vec!["cache/**"], vec!["!cache/keep"]),
+            (
+                vec!["cache/**", "!cache/keep"],
+                vec!["cache/**", "!cache/keep", "local/**"],
+                vec!["!cache/keep", "cache/**"],
+            ),
+            (
+                vec!["cache/**", "!cache/keep"],
+                vec!["cache/**", "local/**"],
+                vec!["cache/**", "remote/**"],
+            ),
+        ] {
+            let (base, local, remote) = (
+                manifest_with_exclusions(&base),
+                manifest_with_exclusions(&local),
+                manifest_with_exclusions(&remote),
+            );
+            for (ours, theirs) in [(&local, &remote), (&remote, &local)] {
+                assert!(
+                    Manifest::merge(&base, ours, theirs)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("enrollment conflict in exclusions")
+                );
+            }
+        }
     }
 
     #[test]
